@@ -60,14 +60,14 @@ class Main {
             if(heal.group('crit') ==~/1/) {
                 stats.crits.put(total)
                 if(over > 0) {
-                    stats.critgap.put(0)
+                    stats.critgap.put(-over)
                 } else {
                     stats.critgap.put(hpMax - hp)
                 }
             } else {
                 stats.healHit.put(total)
                 if(over > 0) {
-                    stats.healHitGap.put(0)
+                    stats.healHitGap.put(-over)
                 } else {
                     stats.healHitGap.put(hpMax - hp)
                 }
@@ -160,7 +160,8 @@ class Simulation {
 
         if(stats.critRate() <= 0) {
             // this spell does not crit (TODO provide override)
-            result.addedCritOverhealingRate = result.addedCritBenefit = 0.0
+            result.addedCritOverhealingRate = 0.0
+            result.addedCritBenefit = 0.0
             result.confidence = 1.0
         } else {
             // calculate the percent of existing hits which become crits per 1% crit rate gained
