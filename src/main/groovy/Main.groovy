@@ -20,7 +20,7 @@ class Main {
         Map<String,Map<String,Stats>> playerStats = [:].withDefault {[:].withDefault {new Stats()}}
 
 //        InputStream is = Main.class.getResourceAsStream('WoWCombatLog.txt')
-        FileInputStream is = new FileInputStream('E:\\Battle.net\\World of Warcraft Beta\\Logs\\WoWCombatLog-bak.txt')
+        FileInputStream is = new FileInputStream('E:\\Battle.net\\World of Warcraft Beta\\Logs\\WoWCombatLog-mythic run.txt')
         BufferedInputStream bis = new BufferedInputStream(is)
         bis.readLines().each {
             String tail = it
@@ -58,22 +58,22 @@ class Main {
             int hpMax = Integer.parseInt(heal.group('hpMax'))
 
             if(heal.group('crit') ==~/1/) {
-                stats.crits.put(total)
+                stats.crits = put(stats.crits,total)
                 if(over > 0) {
-                    stats.critgap.put(-over)
+                    stats.critgap = put(stats.critgap,-over)
                 } else {
-                    stats.critgap.put(hpMax - hp)
+                    stats.critgap = put(stats.critgap,hpMax - hp)
                 }
             } else {
-                stats.healHit.put(total)
+                stats.healHit = put(stats.healHit,total)
                 if(over > 0) {
-                    stats.healHitGap.put(-over)
+                    stats.healHitGap = put(stats.healHitGap,-over)
                 } else {
-                    stats.healHitGap.put(hpMax - hp)
+                    stats.healHitGap = put(stats.healHitGap,hpMax - hp)
                 }
             }
 
-            stats.over.put(over)
+            stats.over = put(stats.over,over)
         }
 
         SecureRandom seeds = new SecureRandom()
@@ -86,13 +86,26 @@ class Main {
 
             spells.each { spellName, Stats stats ->
 
+                print "$spellName: "
                 SecureRandom rand = new SecureRandom()
                 simulations.get(name).get(spellName).add(
                         Simulation.calculate(rand, stats, seeds.nextLong()))
+
+                println()
             }
         }
 
         println playerStats
+    }
+
+    public static IntBuffer put(IntBuffer buff, int value) {
+        if(buff.remaining() < 1) {
+            buff = IntBuffer.allocate(buff.capacity()*2)
+        }
+
+        buff.put(value)
+
+        return buff;
     }
 }
 
@@ -106,7 +119,7 @@ class Stats {
     IntBuffer crits = IntBuffer.allocate(500)
     IntBuffer critgap = IntBuffer.allocate(500)
     FloatBuffer crittime = FloatBuffer.allocate(500)
-    IntBuffer over = IntBuffer.allocate(500)
+    IntBuffer over = IntBuffer.allocate(1000)
 
     public List<Integer> asList(IntBuffer buff) {
         List<Integer> l = buff.array() as List
@@ -118,8 +131,17 @@ class Stats {
         return sum / list.size();
     }
 
+    public double ave(List<? extends Number> list, Closure closure) {
+        double sum = (double)list.sum(0.0,closure)
+        return sum / list.size();
+    }
+
     public double critRate() {
         return 100.0 * crits.position() / (over.position());
+    }
+
+    private static final Closure POSITIVE = { Number n ->
+        n>0?n:0
     }
 
     public String toString() {
@@ -131,14 +153,21 @@ class Stats {
         double overheal = 100.0 * (long)o.sum(0l) / ((h.sum(0l) as long) + (long)c.sum(0l))
 
         return """critRate=${critRate()}%
-            hit=[${h.min()}-${ave(h)}-${h.max()}]
-            healHitGap=[${hg.min()}-${ave(hg)}-${hg.max()}]
-            crit=[${c.min()}-${ave(c)}-${c.max()}]
+            hit=[${h.min()} .. ${ave(h)} .. ${h.max()}]
+            healHitGap=[${hg.min(POSITIVE)} .. ${ave(hg,POSITIVE)} .. ${hg.max(POSITIVE)}]
+            crit=[${c.min()} .. ${ave(c)} .. ${c.max()}]
             over=$overheal%
             """.replaceAll(/\n\s+/,' ');
     }
 }
 
+/**
+ * simulations are achieved by **removing** stats and looking for scalar benefit and causal results
+ *
+ * for example:
+ * * remove crit and measure the possible dps removed, overhealing removed, health removed from raid members
+ * * remove haste and translate events forward in time, removing health throughout the encounter, removing damage
+ */
 @CompileStatic
 class Simulation {
     Stats stats;
@@ -146,29 +175,32 @@ class Simulation {
 
     double confidence;
 
-    double addedCritOverhealingRate;
-    double addedCritBenefit;
+    double removedCritOverhealingRate;
+    double removedCritBenefit;
     // TODO need per-effect cast time to measure haste benefit
-    double addedHasteBenefit;
+    // TODO translate healing events to show chain of custody until an overheal or death
+    double removedHasteBenefit;
     // TODO need cause-effect spell damage to measure mastery benefit
-    double addedMasteryBenefit;
-    double addedVersaOverhealingRate;
-    double addedVersaBenefit;
+    double removedMasteryBenefit;
+    double removedVersaOverhealingRate;
+    double removedVersaBenefit;
 
     public static Simulation calculate(Random rand, Stats stats, long seed) {
         Simulation result = new Simulation()
 
         if(stats.critRate() <= 0) {
             // this spell does not crit (TODO provide override)
-            result.addedCritOverhealingRate = 0.0
-            result.addedCritBenefit = 0.0
+            result.removedCritOverhealingRate = 0.0
+            result.removedCritBenefit = 0.0
             result.confidence = 1.0
         } else {
-            // calculate the percent of existing hits which become crits per 1% crit rate gained
+            // calculate the number of existing hits which become crits per 1% crit rate gained
+            // similarly, number of existing crits which become hits per 1% crit rate lost
             double converted = stats.over.position() * 0.01
 
             // threshold to show hypothesis of crit overheal DR
-            int threshold = 0
+            int gainThreshold = 0
+            int lossThreshold = 0
             double overhealingSum = 0
             double gapSum = 0
 
@@ -176,13 +208,13 @@ class Simulation {
 
             for(int i = stats.healHitGap.position(); i >= 0; i--) {
                 if(stats.healHitGap.get(i) < stats.healHit.get(i)) {
-                    threshold++;
+                    gainThreshold++;
                     overhealingSum += stats.healHit.get(i) - stats.healHitGap.get(i)
                 }
                 gapSum += stats.healHitGap.get(i)
             }
 
-            println "$threshold/${stats.healHitGap.position()} possible, ave at 100% ${overhealingSum / stats.healHitGap.position()} / ${gapSum / stats.healHitGap.position()}, converted at 1% $converted"
+            println "$gainThreshold/${stats.healHitGap.position()} possible, ave at 100% ${overhealingSum / stats.healHitGap.position()} / ${gapSum / stats.healHitGap.position()}, converted at 1% $converted"
         }
 
         return result;
